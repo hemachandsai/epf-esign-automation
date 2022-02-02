@@ -1,16 +1,19 @@
 const readline = require("readline");
 const colors = require("colors/safe");
+const fs = require("fs");
+const extract = require("extract-zip");
 const { program } = require("commander");
-const Nightmare = require("nightmare");
 const logger = require("./utils/logger");
 const showNotification = require("./utils/notifier");
+const { exec } = require("child_process");
+let Nightmare;
 
 const appConfig = {
   maxDelayInterval: 5,
   failedAttempts: 0,
-  otpRetries: 0,
 };
-let UAN, PASSWORD, AADHAAR, OTP;
+
+let UAN, PASSWORD, AADHAAR, OTP, SHOWBROWSER;
 let cliOptions, nightmareInstance, inputInterface;
 
 function getDelayIntervalInMinutes() {
@@ -48,6 +51,12 @@ function validateField(fieldName) {
         return false;
       }
       break;
+    case "SHOWBROWSER":
+      if (!fieldValue || (fieldValue !== "true" && fieldValue !== "false")) {
+        console.log(colors.red("Invalid Value. Value can be true or false. Please try again"));
+        return false;
+      }
+      break;
   }
   return true;
 }
@@ -78,25 +87,36 @@ async function promptForUserDetails() {
     input: process.stdin,
     output: process.stdout,
   });
-  if (UAN && PASSWORD && AADHAAR) {
+
+  if (UAN && PASSWORD && AADHAAR && SHOWBROWSER) {
     console.log(colors.magenta("PLEASE ENTER THE OTP RECIEVED ON YOUR MOBILE: "));
     OTP = await wrapQuestionAsPromiseANDValidate("OTP");
   } else {
-    console.log(colors.magenta("PLEASE ENTER THE BELOW DETAILS REQUIRED TO AUTOMATE ESIGN PROCESS IN EPF PORTAL: "));
+    console.log(
+      colors.magenta(
+        "PLEASE ENTER THE BELOW DETAILS REQUIRED TO AUTOMATE ESIGN PROCESS IN EPF PORTAL AND PRESS ENTER KEY: "
+      )
+    );
     if (!UAN) UAN = await wrapQuestionAsPromiseANDValidate("UAN");
     if (!PASSWORD) PASSWORD = await wrapQuestionAsPromiseANDValidate("PASSWORD");
     if (!AADHAAR) AADHAAR = await wrapQuestionAsPromiseANDValidate("AADHAAR");
+    if (!SHOWBROWSER) SHOWBROWSER = (await wrapQuestionAsPromiseANDValidate("SHOWBROWSER")) === "true";
   }
 }
 
 function initNightmare() {
   logger.debug(`initNightmare Invoked`);
+  Nightmare = require("nightmare");
+
+  if (!SHOWBROWSER) {
+    logger.info("Running browser in headless mode.");
+  }
 
   nightmareInstance = Nightmare({
-    show: cliOptions["showBrowser"],
+    show: SHOWBROWSER,
     loadTimeout: 60000,
     gotoTimeout: 30000,
-    waitTimeout: 60000,
+    waitTimeout: 30000,
   }).useragent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.99 Safari/537.36"
   );
@@ -175,6 +195,7 @@ async function loginToEPFSite() {
     .then(async (errorMessage) => {
       if (errorMessage) {
         logger.error(errorMessage);
+        logger.info("Sometimes this might be a false positive error. Please re-run the program to confirm");
         await enterNOOPNode();
       }
     });
@@ -185,10 +206,8 @@ async function enterNOOPNode() {
   return new Promise(async () => {
     setInterval(() => {}, 1000);
     await nightmareInstance.end();
-    showNotification("Error Encountered. Please check CLI logs for more info. Entering NOOP Mode!!!");
-    logger.error(
-      "Entered NOOP Mode. Something went wrong, please have a look at the above error message and restart the program. Sometimes it could be an false error too, please re run the program to confirm."
-    );
+    showNotification("Entering NOOP Mode!!!");
+    logger.info("NOOP Mode Activated.");
   });
 }
 
@@ -215,18 +234,24 @@ async function clickOnEsign() {
   await nightmareInstance
     .wait(1000)
     .wait(() => {
-      const esignElement = document.querySelector("#pendingNominationDetails tbody tr a");
+      const esignElement = document.querySelector("#pendingNominationDetails tbody tr td:nth-child(4) a");
       if (esignElement) {
         return true;
       }
     })
     .click("#pendingNominationDetails tbody tr td:nth-child(4) a")
     .catch(async (error) => {
-      logger.error(
-        `Error while trying to perform clickOnEsign. No past nomination record found. Please submit your nomination details first and then use this tool to automate esign process. Error:\n`,
-        error
-      );
-      await enterNOOPNode();
+      if ((await nightmareInstance.title()) !== "e-Nomination") {
+        throw new Error("Couldn't load E-Nomination page. Exiting current submission and retrying.");
+      } else {
+        logger.error(
+          `Error while trying to perform clickOnEsign. No past nomination record found. Please submit your nomination details first and then use this tool to automate esign process. This could happend because of an un-responsive page too... Error:\n`,
+          error
+        );
+        logger.info("Sometimes this might be a false positive error. Please re-run the program to confirm");
+
+        await enterNOOPNode();
+      }
     });
   logger.info("Done clicking on Esign Option. Waiting to navigate to C-DAC's eSign Service");
 
@@ -238,6 +263,34 @@ async function clickOnEsign() {
   });
 }
 
+async function checkSuccessfulNomination() {
+  logger.debug(`checkSuccessfulNomination Invoked`);
+  logger.info("Checking if E-Nomaination is successful");
+  await nightmareInstance
+    .wait(6000)
+    .wait("#nominationHistoryDetails tbody tr td")
+    .evaluate(() => {
+      const nominationElement = document.querySelector("#nominationHistoryDetails tbody tr td p");
+      if (nominationElement && nominationElement.innerText.match(/No Nomination History found/gi)) {
+        return false;
+      } else {
+        return true;
+      }
+    })
+    .then((isSuccess) => {
+      if (isSuccess) {
+        showNotification("Hurray. Your EPF submission is successful!!");
+        logger.info("Your EPF submission is successful");
+      } else {
+        showNotification("Your EPF submission might be successful. Please check it manully!!");
+        logger.info(
+          "Your EPF submission might be successful as OTP verification is completed. Please check it manually and re-run the program if required."
+        );
+      }
+    });
+  await enterNOOPNode();
+}
+
 async function giveAadhaarConsent() {
   logger.debug(`giveAadhaarConsent Invoked`);
 
@@ -246,11 +299,12 @@ async function giveAadhaarConsent() {
 
   logger.info("Landed in Aadhaar OTP Page. Entering Aadhaar details and triggering OTP.");
   await nightmareInstance
-    .wait(1000)
+    .wait(5000)
     .wait("input#check_aadhaar")
     .click("input#check_aadhaar")
     .type("#VidId", AADHAAR)
     .click("#getOtpId")
+    .wait(3000)
     .wait(() => {
       const errorElement = document.querySelector("#msg");
       const processingElement = document.querySelector("#loadMe .modal-body .loader-txt");
@@ -259,16 +313,15 @@ async function giveAadhaarConsent() {
         throw new Error("Invalid Aadhaar Number. Please restart the application with correct details");
       } else if (otpSentElement && otpSentElement.innerText.match(/OTP has been sent/)) {
         return true;
-      } else if (processingElement && processingElement.innerText.match(/we are processing your request/)) {
+      } else if (
+        (processingElement && processingElement.innerText.match(/we are processing your request/gi)) ||
+        document.querySelector("#getOtpId:disabled")
+      ) {
         // do nothing request is being processed
       } else {
-        console.log(
-          "unexp case",
-          errorElement && errorElement.innerText,
-          otpSentElement && otpSentElement.innerText,
-          processingElement && processingElement.innerText
+        throw new Error(
+          "Landed in an unexpected case while trying to give consent for Aadhaar verification. Exiting current submission flow"
         );
-        // throw new Error("Landed in an unexpected case while trying to give consent for Aadhaar verification. Exiting current submission flow")
       }
     })
     .evaluate(() => {
@@ -294,7 +347,7 @@ async function promptAndSubmitOTP() {
   await nightmareInstance
     .wait("#OTPId")
     .type("#OTPId", OTP)
-    .click("#chkId")
+    .click("#chkId #chk")
     .click("#OTPSubmit")
     .wait((currentURL) => {
       const errorElement = document.querySelector("#msg");
@@ -307,20 +360,11 @@ async function promptAndSubmitOTP() {
       }
       return "";
     })
-    .then(async (errorMessage) => {
-      if (errorMessage ** appConfig.otpRetries < 2) {
-        appConfig.otpRetries++;
-        log.error(
-          `Error encountered while trying to submit OTP. Please check and re-enter again. Here is the error message from EPF site: ${errorMessage}`
-        );
-      } else if (errorMessage && appConfig.otpRetries >= 2) {
-        appConfig.otpRetries = 0;
-        log.error(
-          `Error encountered while trying to submit OTP. Triggering Resend OTP. Here is the error message from EPF site: ${errorMessage}`
-        );
-        await nightmareInstance.wait(30000).click("#rsOtp");
-      }
-      await promptAndSubmitOTP();
+    .then((errorMessage) => {
+      logger.error(
+        `Error encountered while trying to submit OTP. Please check and re-enter again. Here is the error message from EPF site: ${errorMessage}`
+      );
+      throw new Error("Invalid OTP error. Exiting current submission flow...");
     });
 }
 
@@ -338,6 +382,7 @@ async function intiateESIGNProcess() {
     await clickOnEsign();
     await giveAadhaarConsent();
     await promptAndSubmitOTP();
+    await checkSuccessfulNomination();
   } catch (error) {
     appConfig.failedAttempts++;
     await captureErrorScreenshot();
@@ -358,30 +403,67 @@ const schedulerFunc = async () => {
   logger.debug(`schedulerFunc Invoked: Current Delay Interval is ${getDelayIntervalInMinutes()} minutes`);
   await intiateESIGNProcess();
   logger.info(`Next Esign submission is scheduled after ${getDelayIntervalInMinutes()} minutes`);
-  setTimeout(schedulerFunc, getDelayIntervalInMinutes() * 60);
+  setTimeout(schedulerFunc, getDelayIntervalInMinutes() * 60 * 1000);
 };
 
 async function parseAndValidateCLIFlags() {
-  program.version("1.0.0");
   program
+    .version("1.0.0")
+    .name("epf-esign-automation.exe")
+    .usage("-u <uan number> -p <password> -a <aadhaar>")
     .option("-a, --aadhaar <12 digits Aadhaar Number>", "Your Aadhaar Number")
     .option("-u, --uan <12 digits UAN Number>", "Your UAN Number")
     .option("-p, --password <Password>", "Your password for EPF website")
     .option("-b, --show-browser", "Use this flag if you want to disable headless mode", false)
     .option("-s, --silent", "Use this flag to run in silent mode, without notifications", false);
+
   program.parse(process.argv);
   cliOptions = program.opts();
+
+  if (cliOptions["showBrowser"]) SHOWBROWSER = true;
 
   ["uan", "password", "aadhaar"].forEach((field) => {
     if (cliOptions[field] && cliOptions[field].validateField(field.toUpperCase())) {
       eval(`${field.toUpperCase()}="${cliOptions[field]}"`);
     }
   });
-  if (!UAN || !PASSWORD || !AADHAAR) await promptForUserDetails();
+  if (!UAN || !PASSWORD || !AADHAAR || !SHOWBROWSER) await promptForUserDetails();
+}
+
+async function checkIfNodemodulesExists() {
+  return new Promise((resolve) => {
+    exec("dir", (err, stdout, stderr) => {
+      if (err) {
+        logger.debug(`Exec Listdir error: ${err}`);
+        resolve(false);
+      } else if (stdout.match(/node_modules/)) {
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    });
+  });
+}
+
+// this method is required as electron which runs as child process cannot access files inside the exe package. So we unzip the node_modules and copy to local file system.
+async function unzipNodeModules() {
+  const modulesFolderName = "node_modules";
+  fs.copyFileSync(`${modulesFolderName}.zip`, `${modulesFolderName}.zip`);
+
+  logger.info(
+    `Unzipping the ${modulesFolderName} zip and writing to ${process.cwd()}/${modulesFolderName}. This happens only during the first run.`
+  );
+  await extract(`${modulesFolderName}.zip`, {
+    dir: process.cwd(),
+  });
+
+  logger.debug("Extraction complete");
 }
 
 async function main() {
   await parseAndValidateCLIFlags();
+  const depsExist = await checkIfNodemodulesExists();
+  if (!depsExist) await unzipNodeModules();
   await schedulerFunc();
 }
 
