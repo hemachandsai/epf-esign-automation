@@ -16,7 +16,7 @@
 ## What is this project for
  - Recently <b>EPFO</b> has made completion of E-Nomination process mandatory for all, but the site is quite buggy and un-responsive most of the times. 
  - This project helps to complete the ESign process through automation without having to go through the hectic process and saves lot of time. It uses [Electron Framework](https://www.electronjs.org/) and [Nightmare](https://github.com/segmentio/nightmare) under the hoods for browser automation. 
- - This tool can be left running in the background(visible browser or headless mode) and it keeps on retrying the submission with an increasing delay(max value of 5 minutes)
+ - This tool can be left running in the background(visible browser or headless mode) and it keeps on retrying the submission with an increasing delay(max value of 5 minutes). It notifies you of important messages through Desktop Notifications.
 
 ## How to use
 - Download the latest binary from the [releases section](https://github.com/hemachandsai/epf-esign-automation/releases) depending on the target platform
