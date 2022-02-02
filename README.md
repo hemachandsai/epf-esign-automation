@@ -1,9 +1,9 @@
 
 <div align="center">
-  <img src="./assets/logo.png" align="center"></img>
+  <img src="./assets/logo.png" width="300px" height="150px" align="center"></img>
   <br/>
   <br/>
-  <p><i>EPF Esign automation</i>
+  <p><b><i>EPF Esign Automation</i></b>
   <br/>
   <i>Tool to automate the Esign process for those who had created E-Nomination entry</i>
   </p>
